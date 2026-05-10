@@ -505,12 +505,15 @@ static bongocat_error_t system_initialize_components(void) {
     return result;
   }
 
-  // Build initial pre-scaled frame cache (images loaded, config set)
+  // Build initial pre-scaled frame cache (images loaded, config set).
+  // Rasterize at the compositor's render scale (HiDPI) so the SVG renders
+  // pixel-perfect at any output scale; falls back to 1× if no scale event
+  // has arrived yet.
   {
-    int cat_h = g_config.cat_height;
-    int cat_w = (cat_h * CAT_IMAGE_WIDTH) / CAT_IMAGE_HEIGHT;
-    animation_cache_frames(cat_w, cat_h, g_config.mirror_x, g_config.mirror_y,
-                           g_config.enable_antialiasing);
+    int cat_h_phys = wayland_phys_dim(g_config.cat_height);
+    int cat_w_phys = (cat_h_phys * CAT_IMAGE_WIDTH) / CAT_IMAGE_HEIGHT;
+    animation_cache_frames(cat_w_phys, cat_h_phys, g_config.mirror_x,
+                           g_config.mirror_y, g_config.enable_antialiasing);
   }
 
   // Start input monitoring

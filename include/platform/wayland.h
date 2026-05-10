@@ -83,4 +83,9 @@ void wayland_set_tick_callback(void (*callback)(void));
 // Get current layer name for logging
 BONGOCAT_NODISCARD const char *wayland_get_current_layer_name(void);
 
+// HiDPI: convert a logical-pixel dimension to physical (buffer-coordinate)
+// pixels using the active render scale. Defaults to identity (scale 1.0×) if
+// the compositor has not announced a scale yet.
+BONGOCAT_NODISCARD int wayland_phys_dim(int logical);
+
 #endif  // WAYLAND_H

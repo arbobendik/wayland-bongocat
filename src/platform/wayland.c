@@ -6,6 +6,8 @@
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic ignored "-Wshadow"
 #endif
+#include "../protocols/fractional-scale-v1-client-protocol.h"
+#include "../protocols/viewporter-client-protocol.h"
 #include "../protocols/wlr-foreign-toplevel-management-v1-client-protocol.h"
 #include "../protocols/xdg-output-unstable-v1-client-protocol.h"
 #if defined(__GNUC__)
@@ -38,6 +40,30 @@ struct wl_buffer *buffer;
 struct zwlr_layer_surface_v1 *layer_surface;
 uint8_t *pixels;
 static size_t pixel_buffer_size = 0;
+
+// HiDPI: fractional-scale + viewporter
+static struct wp_viewporter *viewporter = NULL;
+static struct wp_fractional_scale_manager_v1 *fractional_scale_mgr = NULL;
+static struct wp_viewport *viewport = NULL;
+static struct wp_fractional_scale_v1 *fractional_scale_obj = NULL;
+// Effective render scale, encoded as numerator over 120 (so 120 = 1.0×, 240 =
+// 2.0×, 180 = 1.5×). Updated via wp_fractional_scale_v1::preferred_scale or
+// wl_output::scale fallback.
+static uint32_t current_scale_120 = 120;
+// Physical (buffer-coordinate) dimensions of the active buffer.
+static int physical_buffer_w = 0;
+static int physical_buffer_h = 0;
+
+// Ceil-divide logical pixels by 120 / scale_120 to get physical pixels.
+static inline int phys_dim(int logical) {
+  if (logical <= 0)
+    return 0;
+  return (int)(((int64_t)logical * (int64_t)current_scale_120 + 119) / 120);
+}
+
+int wayland_phys_dim(int logical) {
+  return phys_dim(logical);
+}
 
 static config_t *current_config;
 static void (*tick_callback_fn)(void) = NULL;
@@ -313,8 +339,11 @@ void draw_bar(void) {
 
   // Clear buffer with transparency - OPTIMIZED
   // Write all pixels as 32-bit values: RGB=0, A=opacity
-  size_t buffer_size = (size_t)current_config->screen_width *
-                       (size_t)current_config->overlay_height * 4U;
+  // Buffer dimensions are physical (post-scale) pixels — the compositor maps
+  // them back to the logical surface size via wp_viewport / buffer_scale.
+  int phys_w = physical_buffer_w;
+  int phys_h = physical_buffer_h;
+  size_t buffer_size = (size_t)phys_w * (size_t)phys_h * 4U;
   memset(pixels, 0, buffer_size);
 
   if (effective_opacity > 0) {
@@ -328,32 +357,33 @@ void draw_bar(void) {
 
   // Draw cat if visible
   if (!is_fullscreen) {
-    int cat_height = current_config->cat_height;
-    int cat_width = (cat_height * CAT_IMAGE_WIDTH) / CAT_IMAGE_HEIGHT;
-    int cat_y = (current_config->overlay_height - cat_height) / 2 +
-                current_config->cat_y_offset;
+    // Cat dimensions and offsets are in logical pixels in the config; convert
+    // to physical for the buffer-space blit.
+    int cat_height_phys = phys_dim(current_config->cat_height);
+    int cat_width_phys = (cat_height_phys * CAT_IMAGE_WIDTH) / CAT_IMAGE_HEIGHT;
+    int cat_y_phys =
+        (phys_h - cat_height_phys) / 2 + phys_dim(current_config->cat_y_offset);
 
-    int cat_x = 0;
+    int cat_x_phys = 0;
     switch (current_config->cat_align) {
     case ALIGN_CENTER:
-      cat_x = (current_config->screen_width - cat_width) / 2 +
-              current_config->cat_x_offset;
+      cat_x_phys = (phys_w - cat_width_phys) / 2 +
+                   phys_dim(current_config->cat_x_offset);
       break;
     case ALIGN_LEFT:
-      cat_x = current_config->cat_x_offset;
+      cat_x_phys = phys_dim(current_config->cat_x_offset);
       break;
     case ALIGN_RIGHT:
-      cat_x = current_config->screen_width - cat_width -
-              current_config->cat_x_offset;
+      cat_x_phys =
+          phys_w - cat_width_phys - phys_dim(current_config->cat_x_offset);
       break;
     }
 
     cached_frame_t *frame = &anim_cached_frames[anim_index];
     if (frame->data && frame->width > 0 && frame->height > 0) {
       // Blit pre-scaled cached frame (already BGRA, no channel swap)
-      blit_cached_frame(pixels, current_config->screen_width,
-                        current_config->overlay_height, frame->data,
-                        frame->width, frame->height, cat_x, cat_y);
+      blit_cached_frame(pixels, phys_w, phys_h, frame->data, frame->width,
+                        frame->height, cat_x_phys, cat_y_phys);
     } else {
       bongocat_log_debug("Frame %d cache not ready, skipping draw", anim_index);
     }
@@ -362,8 +392,7 @@ void draw_bar(void) {
   }
 
   wl_surface_attach(surface, buffer, 0, 0);
-  wl_surface_damage_buffer(surface, 0, 0, current_config->screen_width,
-                           current_config->overlay_height);
+  wl_surface_damage_buffer(surface, 0, 0, phys_w, phys_h);
   wl_surface_commit(surface);
   pthread_mutex_unlock(&anim_lock);
 
@@ -455,9 +484,15 @@ static void output_done([[maybe_unused]] void *data,
 }
 
 static void output_scale([[maybe_unused]] void *data,
-                         [[maybe_unused]] struct wl_output *wl_output,
-                         [[maybe_unused]] int32_t factor) {
-  // Scale not needed for our use case
+                         struct wl_output *wl_output, int32_t factor) {
+  if (factor < 1)
+    factor = 1;
+  for (size_t i = 0; i < output_count; ++i) {
+    if (outputs[i].wl_output == wl_output) {
+      outputs[i].wl_scale = factor;
+      break;
+    }
+  }
 }
 
 static struct wl_output_listener output_listener = {
@@ -466,6 +501,47 @@ static struct wl_output_listener output_listener = {
     .done = output_done,
     .scale = output_scale,
 };
+
+// =============================================================================
+// HIDPI: FRACTIONAL SCALE HANDLING
+// =============================================================================
+
+// Forward declarations.
+static bongocat_error_t wayland_recreate_buffer_for_scale(void);
+static void wayland_recache_frames_for_scale(void);
+
+static void fractional_scale_preferred_scale(
+    [[maybe_unused]] void *data,
+    [[maybe_unused]] struct wp_fractional_scale_v1 *fs, uint32_t scale) {
+  if (scale == 0 || scale == current_scale_120) {
+    return;
+  }
+  bongocat_log_info("Compositor requested fractional scale %u/120 (%.3f)",
+                    scale, (double)scale / 120.0);
+  current_scale_120 = scale;
+  if (surface) {
+    if (wayland_recreate_buffer_for_scale() == BONGOCAT_SUCCESS) {
+      wayland_recache_frames_for_scale();
+      if (atomic_load(&configured)) {
+        draw_bar();
+      }
+    }
+  }
+}
+
+static const struct wp_fractional_scale_v1_listener fractional_scale_listener =
+    {
+        .preferred_scale = fractional_scale_preferred_scale,
+};
+
+// Pick effective scale_120 from output's wl_output::scale when fractional
+// protocol is unavailable.
+static uint32_t scale_120_from_output(void) {
+  if (current_output_info && current_output_info->wl_scale > 0) {
+    return (uint32_t)current_output_info->wl_scale * 120u;
+  }
+  return 120;
+}
 
 // =============================================================================
 // WAYLAND PROTOCOL REGISTRY
@@ -494,6 +570,15 @@ static void registry_global([[maybe_unused]] void *data,
   } else if (strcmp(iface, zxdg_output_manager_v1_interface.name) == 0) {
     xdg_output_manager = wl_registry_bind(
         reg, name, &zxdg_output_manager_v1_interface, BIND_MIN_VER(ver, 3));
+  } else if (strcmp(iface, wp_viewporter_interface.name) == 0) {
+    viewporter = (struct wp_viewporter *)wl_registry_bind(
+        reg, name, &wp_viewporter_interface, BIND_MIN_VER(ver, 1));
+  } else if (strcmp(iface, wp_fractional_scale_manager_v1_interface.name) ==
+             0) {
+    fractional_scale_mgr =
+        (struct wp_fractional_scale_manager_v1 *)wl_registry_bind(
+            reg, name, &wp_fractional_scale_manager_v1_interface,
+            BIND_MIN_VER(ver, 1));
   } else if (strcmp(iface, wl_output_interface.name) == 0) {
     if (output_count < MAX_OUTPUTS) {
       outputs[output_count].name = name;
@@ -721,6 +806,27 @@ static bongocat_error_t wayland_setup_surface(void) {
     return BONGOCAT_ERROR_WAYLAND;
   }
 
+  // HiDPI plumbing: pair surface with a viewport (so we can render at
+  // physical-pixel resolution and let compositor downscale to the logical
+  // size) and a fractional-scale receiver (so we learn the preferred scale).
+  if (viewporter && !viewport) {
+    viewport = wp_viewporter_get_viewport(viewporter, surface);
+  }
+  if (fractional_scale_mgr && !fractional_scale_obj) {
+    fractional_scale_obj = wp_fractional_scale_manager_v1_get_fractional_scale(
+        fractional_scale_mgr, surface);
+    if (fractional_scale_obj) {
+      wp_fractional_scale_v1_add_listener(fractional_scale_obj,
+                                          &fractional_scale_listener, NULL);
+    }
+  }
+
+  // If fractional protocol is unavailable, seed scale from wl_output integer
+  // scale so the first buffer is sized correctly.
+  if (!fractional_scale_obj) {
+    current_scale_120 = scale_120_from_output();
+  }
+
   layer_surface = zwlr_layer_shell_v1_get_layer_surface(
       layer_shell, surface, output, wl_layer, "bongocat-overlay");
 
@@ -758,8 +864,12 @@ static bongocat_error_t wayland_setup_surface(void) {
 }
 
 static bongocat_error_t wayland_setup_buffer(void) {
-  size_t size = (size_t)current_config->screen_width *
-                (size_t)current_config->overlay_height * 4U;
+  int logical_w = current_config->screen_width;
+  int logical_h = current_config->overlay_height;
+  int phys_w = phys_dim(logical_w);
+  int phys_h = phys_dim(logical_h);
+
+  size_t size = (size_t)phys_w * (size_t)phys_h * 4U;
   if (size == 0 || size > (size_t)INT32_MAX) {
     bongocat_log_error("Invalid buffer size: %zu", size);
     return BONGOCAT_ERROR_WAYLAND;
@@ -788,9 +898,8 @@ static bongocat_error_t wayland_setup_buffer(void) {
     return BONGOCAT_ERROR_WAYLAND;
   }
 
-  buffer = wl_shm_pool_create_buffer(
-      pool, 0, current_config->screen_width, current_config->overlay_height,
-      current_config->screen_width * 4, WL_SHM_FORMAT_ARGB8888);
+  buffer = wl_shm_pool_create_buffer(pool, 0, phys_w, phys_h, phys_w * 4,
+                                     WL_SHM_FORMAT_ARGB8888);
   if (!buffer) {
     bongocat_log_error("Failed to create buffer");
     wl_shm_pool_destroy(pool);
@@ -802,7 +911,74 @@ static bongocat_error_t wayland_setup_buffer(void) {
 
   wl_shm_pool_destroy(pool);
   close(fd);
+
+  physical_buffer_w = phys_w;
+  physical_buffer_h = phys_h;
+
+  // Tell the compositor how to map our physical buffer to the logical
+  // surface. With viewporter we keep buffer_scale=1 and let the destination
+  // size carry the logical dimensions (works for any fractional ratio).
+  // Without viewporter, fall back to integer set_buffer_scale.
+  if (viewport) {
+    wp_viewport_set_destination(viewport, logical_w, logical_h);
+    wl_surface_set_buffer_scale(surface, 1);
+  } else {
+    int integer_scale = (int)(current_scale_120 / 120u);
+    if (integer_scale < 1)
+      integer_scale = 1;
+    wl_surface_set_buffer_scale(surface, integer_scale);
+  }
+
+  bongocat_log_debug(
+      "Buffer allocated: logical %dx%d, physical %dx%d, scale %u/120",
+      logical_w, logical_h, phys_w, phys_h, current_scale_120);
   return BONGOCAT_SUCCESS;
+}
+
+// Tear down current buffer + shm and reallocate at the active scale. Caller
+// must hold anim_lock if there's any chance draw_bar is racing.
+static bongocat_error_t wayland_recreate_buffer_for_scale(void) {
+  if (!current_config || !surface) {
+    return BONGOCAT_ERROR_INVALID_PARAM;
+  }
+
+  pthread_mutex_lock(&anim_lock);
+  atomic_store(&configured, false);
+  if (buffer) {
+    wl_buffer_destroy(buffer);
+    buffer = NULL;
+  }
+  if (pixels && pixel_buffer_size > 0) {
+    munmap(pixels, pixel_buffer_size);
+    pixels = NULL;
+    pixel_buffer_size = 0;
+  }
+  bongocat_error_t err = wayland_setup_buffer();
+  pthread_mutex_unlock(&anim_lock);
+
+  if (err != BONGOCAT_SUCCESS) {
+    return err;
+  }
+
+  // Surface needs a commit so the compositor picks up the new buffer_scale /
+  // viewport destination before the next draw.
+  wl_surface_commit(surface);
+  wl_display_roundtrip(display);
+  return BONGOCAT_SUCCESS;
+}
+
+// Re-rasterize the SVG cat frames at the new physical pixel resolution.
+static void wayland_recache_frames_for_scale(void) {
+  if (!current_config)
+    return;
+  pthread_mutex_lock(&anim_lock);
+  animation_invalidate_cache();
+  int cat_h_phys = phys_dim(current_config->cat_height);
+  int cat_w_phys = (cat_h_phys * CAT_IMAGE_WIDTH) / CAT_IMAGE_HEIGHT;
+  animation_cache_frames(cat_w_phys, cat_h_phys, current_config->mirror_x,
+                         current_config->mirror_y,
+                         current_config->enable_antialiasing);
+  pthread_mutex_unlock(&anim_lock);
 }
 
 bongocat_error_t wayland_init(config_t *config) {
@@ -824,6 +1000,11 @@ bongocat_error_t wayland_init(config_t *config) {
     wayland_cleanup();
     return result;
   }
+
+  // Drain the pending fractional-scale handshake so the buffer is sized at
+  // the compositor's preferred scale before main.c rasterizes the SVGs.
+  // Without this, scale 2.0 displays would render the first frame at 1×.
+  wl_display_roundtrip(display);
 
   applied_width = current_config->screen_width;
   applied_height = current_config->overlay_height;
@@ -1000,6 +1181,16 @@ void wayland_update_config(config_t *config) {
       zwlr_layer_surface_v1_destroy(layer_surface);
       layer_surface = NULL;
     }
+    // Per-surface HiDPI receivers must die with the surface; setup_surface
+    // will recreate them attached to the new wl_surface.
+    if (fractional_scale_obj) {
+      wp_fractional_scale_v1_destroy(fractional_scale_obj);
+      fractional_scale_obj = NULL;
+    }
+    if (viewport) {
+      wp_viewport_destroy(viewport);
+      viewport = NULL;
+    }
     if (surface) {
       wl_surface_destroy(surface);
       surface = NULL;
@@ -1026,7 +1217,7 @@ void wayland_update_config(config_t *config) {
     }
 
     animation_invalidate_cache();
-    int cat_h = config->cat_height;
+    int cat_h = phys_dim(config->cat_height);
     int cat_w = (cat_h * CAT_IMAGE_WIDTH) / CAT_IMAGE_HEIGHT;
     animation_cache_frames(cat_w, cat_h, config->mirror_x, config->mirror_y,
                            config->enable_antialiasing);
@@ -1070,7 +1261,7 @@ void wayland_update_config(config_t *config) {
     }
 
     animation_invalidate_cache();
-    int cat_h = config->cat_height;
+    int cat_h = phys_dim(config->cat_height);
     int cat_w = (cat_h * CAT_IMAGE_WIDTH) / CAT_IMAGE_HEIGHT;
     animation_cache_frames(cat_w, cat_h, config->mirror_x, config->mirror_y,
                            config->enable_antialiasing);
@@ -1095,7 +1286,7 @@ void wayland_update_config(config_t *config) {
   if (!needs_full_recreate && !needs_buffer_recreate) {
     pthread_mutex_lock(&anim_lock);
     animation_invalidate_cache();
-    int cat_h = config->cat_height;
+    int cat_h = phys_dim(config->cat_height);
     int cat_w = (cat_h * CAT_IMAGE_WIDTH) / CAT_IMAGE_HEIGHT;
     animation_cache_frames(cat_w, cat_h, config->mirror_x, config->mirror_y,
                            config->enable_antialiasing);
@@ -1164,9 +1355,29 @@ void wayland_cleanup(void) {
     layer_surface = NULL;
   }
 
+  // Destroy fractional-scale and viewport receivers before the surface they
+  // reference.
+  if (fractional_scale_obj) {
+    wp_fractional_scale_v1_destroy(fractional_scale_obj);
+    fractional_scale_obj = NULL;
+  }
+  if (viewport) {
+    wp_viewport_destroy(viewport);
+    viewport = NULL;
+  }
+
   if (surface) {
     wl_surface_destroy(surface);
     surface = NULL;
+  }
+
+  if (fractional_scale_mgr) {
+    wp_fractional_scale_manager_v1_destroy(fractional_scale_mgr);
+    fractional_scale_mgr = NULL;
+  }
+  if (viewporter) {
+    wp_viewporter_destroy(viewporter);
+    viewporter = NULL;
   }
 
   // Note: output is just a reference to one of the outputs[] entries

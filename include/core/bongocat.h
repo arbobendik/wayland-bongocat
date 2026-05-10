@@ -84,6 +84,7 @@ typedef struct {
   int raw_height;
   bool mode_received;
   bool geometry_received;
+  int32_t wl_scale;  // Last wl_output::scale (integer, defaults to 1)
 } output_ref_t;
 
 // =============================================================================
