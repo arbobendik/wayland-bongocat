@@ -34,7 +34,11 @@ yay -S bongocat
 # Build this fork from source
 git clone https://github.com/arbobendik/wayland-bongocat.git
 cd wayland-bongocat && make release
+
+# Install the binary (pick one)
 sudo install -Dm755 build/bongocat /usr/local/bin/bongocat
+# or user-local:
+# install -Dm755 build/bongocat ~/.local/bin/bongocat
 ```
 
 ### Setup Permissions
@@ -76,7 +80,7 @@ Install and enable:
 ```bash
 install -Dm755 scripts/bongocat-session.sh ~/.local/bin/bongocat-session.sh
 install -Dm644 systemd/user/bongocat.service ~/.config/systemd/user/bongocat.service
-# Optional: keep a restore template if the live config is ever corrupted
+# Optional restore template used if the live config is corrupted
 install -Dm644 bongocat.conf.example ~/.config/bongocat/bongocat.conf.template
 
 systemctl --user daemon-reload
@@ -95,6 +99,9 @@ inherits `WAYLAND_DISPLAY` from the graphical session.
 - `scripts/bongocat-session.sh` supervisor (show/hide peek + random X)
 - `systemd/user/bongocat.service` user unit for Plasma / graphical-session autostart
 
+The hot-reload smoothness changes are compiled into `build/bongocat` itself. You do
+not need a separate `bongocat-patched` binary when installing from this fork.
+
 ## Configuration
 
 Create `~/.config/bongocat/bongocat.conf`:
@@ -107,8 +114,8 @@ Create `~/.config/bongocat/bongocat.conf`:
 # Position & Size
 cat_height=110
 cat_align=center
-# cat_x_offset=0
-# cat_y_offset=0
+cat_x_offset=0
+cat_y_offset=0
 
 # Appearance
 overlay_height=120
