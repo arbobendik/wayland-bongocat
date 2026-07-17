@@ -21,12 +21,22 @@ readonly START_WAIT_SEC=0.20
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/bongocat"
 readonly CONFIG="${CONFIG_DIR}/bongocat.conf"
 readonly CONFIG_TEMPLATE="${CONFIG_DIR}/bongocat.conf.template"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Optional override: BONGOCAT=/path/to/bongocat
+readonly LOCAL_BONGOCAT="/usr/local/bin/bongocat"
+readonly SYSTEM_BONGOCAT=/usr/bin/bongocat
 readonly USER_PATCHED_BONGOCAT="$HOME/.local/bin/bongocat-patched"
 readonly SYSTEM_PATCHED_BONGOCAT=/usr/local/bin/bongocat-patched
-readonly SYSTEM_BONGOCAT=/usr/bin/bongocat
-readonly REPO_BONGOCAT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/build/bongocat"
 readonly PID_FILE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bongocat.pid"
+
+repo_bongocat() {
+  if [[ -f "${REPO_ROOT}/Makefile" && -x "${REPO_ROOT}/build/bongocat" ]]; then
+    echo "${REPO_ROOT}/build/bongocat"
+    return 0
+  fi
+  return 1
+}
 
 bongocat_pid=""
 RELOAD_MODE="hotreload"
@@ -37,8 +47,22 @@ log() {
 }
 
 resolve_bongocat() {
+  local repo_bin
   if [[ -n "${BONGOCAT:-}" && -x "$BONGOCAT" ]]; then
     echo "$BONGOCAT"
+    return 0
+  fi
+  # Prefer a PATH/local install of this fork over legacy *-patched binaries.
+  if command -v bongocat >/dev/null 2>&1; then
+    command -v bongocat
+    return 0
+  fi
+  if [[ -x "$LOCAL_BONGOCAT" ]]; then
+    echo "$LOCAL_BONGOCAT"
+    return 0
+  fi
+  if repo_bin="$(repo_bongocat)"; then
+    echo "$repo_bin"
     return 0
   fi
   if [[ -x "$SYSTEM_PATCHED_BONGOCAT" ]]; then
@@ -49,16 +73,8 @@ resolve_bongocat() {
     echo "$USER_PATCHED_BONGOCAT"
     return 0
   fi
-  if command -v bongocat >/dev/null 2>&1; then
-    command -v bongocat
-    return 0
-  fi
   if [[ -x "$SYSTEM_BONGOCAT" ]]; then
     echo "$SYSTEM_BONGOCAT"
-    return 0
-  fi
-  if [[ -x "$REPO_BONGOCAT" ]]; then
-    echo "$REPO_BONGOCAT"
     return 0
   fi
   log "ERROR: no bongocat binary found"
@@ -108,17 +124,17 @@ stop_all_bongocat() {
   fi
   bongocat_pid=""
 
-  if pgrep -f 'bongocat-patched|/usr/bin/bongocat' >/dev/null 2>&1; then
-    pkill -TERM -f 'bongocat-patched|/usr/bin/bongocat' 2>/dev/null || true
+  if pgrep -f '/(bongocat-patched|bongocat)( |$)' >/dev/null 2>&1; then
+    pkill -TERM -f '/(bongocat-patched|bongocat)( |$)' 2>/dev/null || true
     local i=0
-    while pgrep -f 'bongocat-patched|/usr/bin/bongocat' >/dev/null 2>&1 && (( i < 100 )); do
+    while pgrep -f '/(bongocat-patched|bongocat)( |$)' >/dev/null 2>&1 && (( i < 100 )); do
       sleep 0.05
       i=$(( i + 1 ))
     done
   fi
 
-  if pgrep -f 'bongocat-patched|/usr/bin/bongocat' >/dev/null 2>&1; then
-    pkill -KILL -f 'bongocat-patched|/usr/bin/bongocat' 2>/dev/null || true
+  if pgrep -f '/(bongocat-patched|bongocat)( |$)' >/dev/null 2>&1; then
+    pkill -KILL -f '/(bongocat-patched|bongocat)( |$)' 2>/dev/null || true
     sleep 0.05
   fi
 

@@ -11,7 +11,8 @@ Type=simple
 ExecStart=%h/.local/bin/bongocat-session.sh
 Restart=on-failure
 RestartSec=5
-# Inherit WAYLAND_DISPLAY / DISPLAY from the graphical session import.
+# Prefer user-local installs; inherit display vars from the graphical session.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR
 
 [Install]
