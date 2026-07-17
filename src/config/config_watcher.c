@@ -116,15 +116,15 @@ static void *config_watcher_thread(void *arg) {
         }
       }
 
-      // Debounce reloads (300ms)
+      // Debounce reloads (50ms for smooth offset animation).
       if (should_reload) {
         long long current_ms = config_watcher_now_ms();
-        if (current_ms - last_reload_ms >= 300) {
+        if (current_ms - last_reload_ms >= 50) {
           bongocat_log_info("Config file changed, reloading...");
           last_reload_ms = current_ms;
 
-          // Small delay to ensure file write is complete
-          usleep(100000);  // 100ms
+          // Small delay to ensure file write is complete.
+          usleep(25000);
 
           if (watcher->reload_callback) {
             watcher->reload_callback(watcher->config_path);

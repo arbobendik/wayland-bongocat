@@ -373,6 +373,15 @@ static void config_reload_apply(const char *config_path) {
 
   bool input_changed = !config_input_settings_equal(&g_config, &temp_config);
 
+  // Preserve runtime-detected fields that are not stored in the config file.
+  if (g_config.screen_width > 0) {
+    temp_config.screen_width = g_config.screen_width;
+  }
+  if (g_config.output_name) {
+    free(temp_config.output_name);
+    temp_config.output_name = strdup(g_config.output_name);
+  }
+
   // Swap in new config under animation lock to avoid reader races
   pthread_mutex_lock(&anim_lock);
   config_cleanup_full(&g_config);
