@@ -1366,9 +1366,11 @@ void wayland_update_config(config_t *config) {
     wl_display_roundtrip(display);
   }
 
-  // Always rebuild cache for cat_height/mirror/etc changes (even if no
-  // surface changes). Skip if we already rebuilt above.
-  if (!needs_full_recreate && !needs_buffer_recreate) {
+  // Rebuild cache for cat_height/mirror/etc changes. Skip for offset-only
+  // updates so hot-reload repositioning stays smooth.
+  bool offset_only_update =
+      !needs_full_recreate && !needs_buffer_recreate && !needs_property_update;
+  if (!needs_full_recreate && !needs_buffer_recreate && !offset_only_update) {
     pthread_mutex_lock(&anim_lock);
     animation_invalidate_cache();
     int cat_h = phys_dim(config->cat_height);
