@@ -7,6 +7,10 @@ A cute Wayland overlay that shows an animated bongo cat reacting to your keyboar
 
 ![Demo](assets/demo.gif)
 
+> Fork of [saatvik333/wayland-bongocat](https://github.com/saatvik333/wayland-bongocat) with optional session
+> autostart: a user systemd service plus a supervisor script that periodically repositions the cat
+> with a short show/hide (Y-axis) animation. Upstream remains MIT-licensed; see [LICENSE](LICENSE).
+
 ## Features
 
 - 🎯 Real-time keyboard animation
@@ -16,18 +20,21 @@ A cute Wayland overlay that shows an animated bongo cat reacting to your keyboar
 - 😴 Idle/scheduled sleep mode
 - 🎨 SVG-based rendering (pixel-perfect at any size)
 - ⚡ Lightweight (~8MB RAM)
+- 🚶 Optional animated reposition session (show/hide peek + random X)
+- 🧩 User systemd unit for graphical-session autostart
 
 ## Quick Start
 
 ### Install
 
 ```bash
-# Arch Linux
+# Arch Linux (upstream package)
 yay -S bongocat
 
-# Other distros - build from source
-git clone https://github.com/saatvik333/wayland-bongocat.git
-cd wayland-bongocat && make
+# Build this fork from source
+git clone https://github.com/arbobendik/wayland-bongocat.git
+cd wayland-bongocat && make release
+sudo install -Dm755 build/bongocat /usr/local/bin/bongocat
 ```
 
 ### Setup Permissions
@@ -50,6 +57,43 @@ bongocat --watch-config
 # Optional: force one monitor from CLI
 bongocat --watch-config --monitor eDP-1
 ```
+
+### Optional: animated session (systemd)
+
+This fork adds `scripts/bongocat-session.sh` and `systemd/user/bongocat.service`.
+The script starts bongocat with `--watch-config`, then every 30s peeks the cat up
+(`cat_y_offset` rest→peak→rest) and moves it to a random `cat_x_offset`.
+
+Ensure your config has offset keys set (required by the session script):
+
+```ini
+cat_x_offset=0
+cat_y_offset=45
+```
+
+Install and enable:
+
+```bash
+install -Dm755 scripts/bongocat-session.sh ~/.local/bin/bongocat-session.sh
+install -Dm644 systemd/user/bongocat.service ~/.config/systemd/user/bongocat.service
+# Optional: keep a restore template if the live config is ever corrupted
+install -Dm644 bongocat.conf.example ~/.config/bongocat/bongocat.conf.template
+
+systemctl --user daemon-reload
+systemctl --user enable --now bongocat.service
+systemctl --user status bongocat.service
+```
+
+Override the binary with `BONGOCAT=/path/to/bongocat` if needed. The service
+inherits `WAYLAND_DISPLAY` from the graphical session.
+
+## Fork changes vs upstream
+
+- Faster config-watch debounce and skip of cache rebuilds on offset-only updates
+  (smoother show/hide reposition animation under `--watch-config`)
+- Preserve runtime screen width / output name across config reloads
+- `scripts/bongocat-session.sh` supervisor (show/hide peek + random X)
+- `systemd/user/bongocat.service` user unit for Plasma / graphical-session autostart
 
 ## Configuration
 
@@ -173,9 +217,9 @@ Set `monitor=YOUR_MONITOR` (single) or `monitor=MON1,MON2` (multi) in config. Fi
 ## Building
 
 ```bash
-git clone https://github.com/saatvik333/wayland-bongocat.git
+git clone https://github.com/arbobendik/wayland-bongocat.git
 cd wayland-bongocat
-make          # Release build
+make release  # Optimized build
 make debug    # Debug build
 ```
 
@@ -183,4 +227,7 @@ make debug    # Debug build
 
 ## License
 
-MIT License - see [LICENSE](LICENSE)
+MIT License - see [LICENSE](LICENSE).
+
+Upstream project: [saatvik333/wayland-bongocat](https://github.com/saatvik333/wayland-bongocat)
+(Copyright (c) 2025 Saatvik Sharma).
