@@ -1,0 +1,18 @@
+[Unit]
+Description=Bongo Cat overlay with animated repositioning
+After=plasma-workspace.target graphical-session.target
+PartOf=graphical-session.target
+# Bound crash loops if config or Wayland is unavailable at login.
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/bongocat-session.sh
+Restart=on-failure
+RestartSec=5
+# Inherit WAYLAND_DISPLAY / DISPLAY from the graphical session import.
+PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR
+
+[Install]
+WantedBy=graphical-session.target
